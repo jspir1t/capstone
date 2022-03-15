@@ -5,7 +5,7 @@ from zipfile import ZipFile
 from io import BytesIO
 
 if __name__ == '__main__':
-    las_dir = f'/home/jingtong/las_files'
+    las_dir = f'/mnt/data/lidar/vancouver'
 
     if not os.path.exists(las_dir):
         os.makedirs(las_dir)
