@@ -9,7 +9,7 @@ if __name__ == '__main__':
 
     if not os.path.exists(las_dir):
         os.makedirs(las_dir)
-    with open('lidar-2018.geojson') as file:
+    with open('data/lidar-2018.geojson') as file:
         gj = geojson.load(file)
         for feature in gj['features']:
             prop = feature['properties']
