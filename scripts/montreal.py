@@ -4,14 +4,16 @@ import time
 
 import requests
 from urllib.request import urlopen
+from pyproj import Transformer
 import laspy
 import numpy as np
-import s3fs
 import utm
+import psycopg2
 
 montreal_dir = f'/home/jingtong/montreal_files/'
 las_dir = f'/home/jingtong/montreal_las/'
 failed_laz = f'/home/jingtong/failure.txt'
+laz_dir = f'/mnt/data/lidar/montreal'
 if not os.path.exists(montreal_dir):
     os.makedirs(montreal_dir)
 if not os.path.exists(las_dir):
@@ -52,27 +54,6 @@ class PolygonExtraction:
         self.data_name = data_name
 
     @staticmethod
-    def scaled_x_dimension(las_file):
-        x_dimension = las_file.X
-        scale = las_file.header.scales[0]
-        offset = las_file.header.offsets[0]
-        return (x_dimension * scale) + offset
-
-    @staticmethod
-    def scaled_y_dimension(las_file):
-        y_dimension = las_file.Y
-        scale = las_file.header.scales[1]
-        offset = las_file.header.offsets[1]
-        return (y_dimension * scale) + offset
-
-    @staticmethod
-    def scaled_z_dimension(las_file):
-        z_dimension = las_file.Z
-        scale = las_file.header.scales[2]
-        offset = las_file.header.offsets[2]
-        return (z_dimension * scale) + offset
-
-    @staticmethod
     def utm_to_latlon(las_file):
         start = time.time()
         scaled_x = las_file.x
@@ -98,36 +79,94 @@ class PolygonExtraction:
         with laspy.open(self.input_path + self.data_name) as fh:
             print('Points from Header:', fh.header.point_count)
             f = fh.read()
-            # print(f)
-            print('Points from data:', len(f.points))
-            print('min: ', f.header.min)
-            print('max: ', f.header.max)
 
-            print('scale: ', f.header.scale)
-            print('offset: ', f.header.offset)
+            # get EPSG, for different point cloud dataset, the ESPG might be different. ESPG indicates different locations.
+            # in this case, Montreal data uses ESPG:2950
+            # Vancouver data uses ESPG:3157
+            # https://epsg.io/2950
+            # https://epsg.io/transform#s_srs=2950&t_srs=4326
+            # we need to convert them to an universal reference that is ESPG：4326 also called WGS84, represented by longitude and latitude.
 
-            print()
+            for (i, vlr) in enumerate(f.header.vlrs):
+                print(i, vlr.user_id, vlr.record_id, vlr.description)
+                if vlr.record_id != 34735:
+                    continue
+                for key in vlr.geo_keys:
+                    if key.id != 3072:
+                        continue
+                    print(key.value_offset)
+                    transformer = Transformer.from_crs('epsg:' + str(key.value_offset), 'epsg:4326')
 
-            scaled_x = self.scaled_x_dimension(f)
-            scaled_y = self.scaled_y_dimension(f)
-            scaled_z = self.scaled_z_dimension(f)
+            minpoint = [f.header.min[0], f.header.min[1]]
+            maxpoint = [f.header.max[0], f.header.max[1]]
+            print('min point: ', minpoint)
+            print('max point: ', maxpoint)
 
-            print('actual x: ', scaled_x)
-            print('actual y: ', scaled_y)
-            print('actual z: ', scaled_z)
+            # get longitude and latitude
+            print(transformer.transform(f.header.min[0], f.header.min[1]))
+            print(transformer.transform(f.header.max[0], f.header.max[1]))
 
-            print(' X: ', f.X)
-            print(' Y: ', f.Y)
-            print(' Z: ', f.Z)
 
-            print(' x: ', f.x)
-            print(' y: ', f.y)
-            print(' z: ', f.z)
+class Montreal:
+    def __init__(self, file_path, db_name):
+        self.file_path = file_path
+        self.db_name = db_name
+        self.conn = psycopg2.connect(host='206.12.92.18', dbname='propdb', user='propval', password='BCParks')
+        self.cur = self.conn.cursor()
 
-            lat, lon = self.utm_to_latlon(f)
-            print(len(lat), len(lon))
-            print('latitude:', lat[:10])
-            print('longitude', lon[:10])
+    def upload(self):
+        files = []
+        for file_name in os.listdir(self.file_path):
+            files.append(self.file_path + file_name)
+        for file in files:
+            file_name = file.split('/')[-1][:-4]
+            # if file_name != '300-5039_2015' and file_name != '300-5040_2015' and file_name != '300-5041_2015':
+            #     continue
+            # print(file_name)
+            with laspy.open(file) as fh:
+                print(f"Processing file: {file}")
+                print('Points from Header:', fh.header.point_count)
+                f = fh.read()
+
+                for (i, vlr) in enumerate(f.header.vlrs):
+                    print(i, vlr.user_id, vlr.record_id, vlr.description)
+                    if vlr.record_id == 34735:
+                        for key in vlr.geo_keys:
+                            if key.id == 3072:
+                                value_offset = key.value_offset
+
+                    if vlr.record_id == 34737:
+                        print(vlr.strings[0].split('|')[0])
+                        if vlr.strings[0].split('|')[0] == 'GCS_NAD83_CSRS_QUEBEC' and value_offset == 32767:
+                            value_offset = 6622
+
+                print(f"value offset = {value_offset}")
+                transformer = Transformer.from_crs('epsg:' + str(value_offset), 'epsg:4326')
+
+                # for those three laz files: 300-5039_2015，300-5040_2015，300-5041_2015, simply use the hardcoded epsg
+                # transformer = Transformer.from_crs('epsg:2950', 'epsg:4326')
+
+
+                x_min, y_min = f.header.min[0], f.header.min[1]
+                x_max, y_max = f.header.max[0], f.header.max[1]
+                left_bottom = transformer.transform(x_min, y_min)
+                left_upper = transformer.transform(x_min, y_max)
+                right_bottom = transformer.transform(x_max, y_min)
+                right_upper = transformer.transform(x_max, y_max)
+
+                polygon_data = 'POLYGON(('
+                polygon_data += f'{left_bottom[1]} {left_bottom[0]},'
+                polygon_data += f'{left_upper[1]} {left_upper[0]},'
+                polygon_data += f'{right_upper[1]} {right_upper[0]},'
+                polygon_data += f'{right_bottom[1]} {right_bottom[0]},'
+                polygon_data += f'{left_bottom[1]} {left_bottom[0]},'
+                polygon_data = polygon_data[:-1] + '))'
+
+                self.cur.execute(
+                    f'INSERT INTO public.{self.db_name} (name, geo_polygon) VALUES (\'{file_name}\', \'{polygon_data}\');')
+                print(f'INSERT INTO public.{self.db_name} (name, geo_polygon) VALUES (\'{file_name}\', \'{polygon_data}\');')
+                self.conn.commit()
+        self.conn.close()
 
 
 if __name__ == '__main__':
@@ -136,5 +175,10 @@ if __name__ == '__main__':
 
     # input_path = "/mnt/data/lidar/montreal/"
     # data_name = "307-5062_2015.laz"
-    extractor = PolygonExtraction("/mnt/data/lidar/vancouver/", "4980E_54600N.las")
-    extractor.process()
+
+    # extractor = PolygonExtraction("/mnt/data/lidar/montreal/", "300-5041_2015.laz")
+    # extractor.process()
+
+    # model = Montreal('/mnt/data/lidar/montreal/', 'lidar_montreal')
+    model = Montreal('/mnt/data/lidar/northvancouver/', 'lidar_north_va')
+    model.upload()

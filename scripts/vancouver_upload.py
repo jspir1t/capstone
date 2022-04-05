@@ -5,7 +5,7 @@ import urllib.request as request
 conn = psycopg2.connect(host='206.12.92.18', dbname='propdb', user='propval', password='BCParks')
 cur = conn.cursor()
 
-with open('data/lidar-2018.geojson') as file:
+with open('../data/lidar-2018.geojson') as file:
     gj = geojson.load(file)
     for feature in gj['features']:
 
