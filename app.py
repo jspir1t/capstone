@@ -1,4 +1,5 @@
 # For geodetic coordinates (X, Y), X is longitude and Y is latitude
+import functools
 from flask import Flask, request, abort, jsonify
 from werkzeug.exceptions import HTTPException
 import psycopg2
@@ -19,6 +20,20 @@ print('Loaded', len(satellites), 'satellites')
 ts = load.timescale()
 
 
+def db_conn_refresh_decorator(func):
+    @functools.wraps(func)
+    def wrap_func():
+        global conn, cur
+        if conn.closed:
+            print("Postgres connection refreshing...")
+            conn = psycopg2.connect(host='206.12.92.18', dbname='propdb', user='propval', password='BCParks')
+            cur = conn.cursor()
+            print("Postgres connection refreshed!")
+        return func()
+
+    return wrap_func
+
+
 @app.errorhandler(Exception)
 def handle_error(e):
     code = 500
@@ -28,6 +43,7 @@ def handle_error(e):
 
 
 @app.route('/lidar/polygon', methods=['POST'])
+@db_conn_refresh_decorator
 def lidar_polygon_intersect():
     content_type = request.headers.get('Content-Type')
     if content_type != 'application/json':
@@ -61,6 +77,7 @@ def lidar_polygon_intersect():
 
 
 @app.route('/lidar/circle', methods=['GET'])
+@db_conn_refresh_decorator
 def lidar_circle_intersect():
     args = request.args
     longitude = args.get('longitude', type=float)
@@ -84,6 +101,7 @@ def lidar_circle_intersect():
 
 
 @app.route('/3dtiles/polygon', methods=['POST'])
+@db_conn_refresh_decorator
 def tile_3d_polygon_intersect():
     content_type = request.headers.get('Content-Type')
     if content_type != 'application/json':
@@ -117,6 +135,7 @@ def tile_3d_polygon_intersect():
 
 
 @app.route('/3dtiles/circle', methods=['GET'])
+@db_conn_refresh_decorator
 def tile_3d_circle_intersect():
     args = request.args
     longitude = args.get('longitude', type=float)
